@@ -13,6 +13,7 @@ import network
 import dataset
 import utils
 
+
 class Logger:
     def __init__(self, opt):
         self.writer = SummaryWriter()
@@ -110,89 +111,104 @@ def WGAN_trainer(opt):
     # Initialize start time
     prev_time = time.time()
     
+    def get_sample_schedule(i):
+        
+        # for the first 10k iterations, train over a given batch 5 times
+        if i < 10000:
+            return 5
+        
+        if i < 20000:
+            return 4
+        
+        if i < 30000:
+            return 2
+        
+        return 1
+            
     # training loop
     n_iter = 0
     for epoch in range(opt.epochs):
         for batch_idx, (img, mask) in enumerate(dataloader):
-            n_iter += 1
-            logger.begin(n_iter)
-            
-            # Load mask (shape: [B, 1, H, W]), masked_img (shape: [B, 3, H, W]), img (shape: [B, 3, H, W]) and put it to cuda
-            img = img.cuda()
-            mask = mask.cuda()
-            
-            ### Train discriminator
-            optimizer_d.zero_grad()
-            
-            # Generator output
-            first_out, second_out = generator(img, mask)
-            
-            # forward propagation
-            first_out_wholeimg = img * (1 - mask) + first_out * mask        # in range [-1, 1]
-            second_out_wholeimg = img * (1 - mask) + second_out * mask      # in range [-1, 1]
-            
-            if n_iter % opt.log_every == 1:
-                logger.add_image(img, 'image/training')
-                logger.add_image(mask, 'mask/training')
-                logger.add_image(first_out_wholeimg, 'image/first iteration')
-                logger.add_image(second_out_wholeimg, 'image/second iteration')
-                
-            # Fake samples
-            fake_scalar = discriminator(second_out_wholeimg.detach(), mask)
-            # True samples
-            true_scalar = discriminator(img, mask)
-            
-            # Overall Loss and optimize
-            loss_D = - torch.mean(true_scalar) + torch.mean(fake_scalar)
-            loss_D.backward()
-            optimizer_d.step()
+            for _ in range(get_sample_schedule(n_iter)):
+                n_iter += 1
+                logger.begin(n_iter)
 
-            ### Train Generator
-            optimizer_g.zero_grad()
+                # Load mask (shape: [B, 1, H, W]), masked_img (shape: [B, 3, H, W]), img (shape: [B, 3, H, W]) and put it to cuda
+                img = img.cuda()
+                mask = mask.cuda()
 
-            # Mask L1 Loss
-            first_MaskL1Loss = L1Loss(first_out_wholeimg, img)
-            second_MaskL1Loss = L1Loss(second_out_wholeimg, img)
-            
-            # GAN Loss
-            fake_scalar = discriminator(second_out_wholeimg, mask)
-            GAN_Loss = - torch.mean(fake_scalar)
+                ### Train discriminator
+                optimizer_d.zero_grad()
 
-            # Get the deep semantic feature maps, and compute Perceptual Loss
-            img = (img + 1) / 2                                             # in range [0, 1]
-            img = utils.normalize_ImageNet_stats(img)                       # in range of ImageNet
-            img_featuremaps = perceptualnet(img)                            # feature maps
-            second_out_wholeimg = (second_out_wholeimg + 1) / 2             # in range [0, 1]
-            second_out_wholeimg = utils.normalize_ImageNet_stats(second_out_wholeimg)
-            second_out_wholeimg_featuremaps = perceptualnet(second_out_wholeimg)
-            second_PerceptualLoss = L1Loss(second_out_wholeimg_featuremaps, img_featuremaps)
+                # Generator output
+                first_out, second_out = generator(img, mask)
 
-            # Compute losses
-            loss = first_MaskL1Loss + second_MaskL1Loss + opt.perceptual_param * second_PerceptualLoss + opt.gan_param * GAN_Loss
-            loss.backward()
-            optimizer_g.step()
+                # forward propagation
+                first_out_wholeimg = img * (1 - mask) + first_out * mask        # in range [-1, 1]
+                second_out_wholeimg = img * (1 - mask) + second_out * mask      # in range [-1, 1]
 
-            # Determine approximate time left
-            batches_done = epoch * len(dataloader) + batch_idx
-            batches_left = opt.epochs * len(dataloader) - batches_done
-            time_left = datetime.timedelta(seconds = batches_left * (time.time() - prev_time))
-            prev_time = time.time()
-            
-            logger.add_scalars({
-                'Epoch': epoch + 1,
-                'Batch': batch_idx,
-                'loss/first Mask L1 Loss': first_MaskL1Loss.item(),
-                'loss/second Mask L1 Loss': second_MaskL1Loss.item(),
-                'gan/D Loss': loss_D.item(),
-                'gan/G Loss': GAN_Loss.item(),
-                'Perceptual Loss': second_PerceptualLoss.item()
-            })
-            
-            # Print log
-            print("\r[Epoch %d/%d] [Batch %d/%d] [first Mask L1 Loss: %.5f] [second Mask L1 Loss: %.5f]" %
-                ((epoch + 1), opt.epochs, batch_idx, len(dataloader), first_MaskL1Loss.item(), second_MaskL1Loss.item()))
-            print("\r[D Loss: %.5f] [G Loss: %.5f] [Perceptual Loss: %.5f] time_left: %s" %
-                (loss_D.item(), GAN_Loss.item(), second_PerceptualLoss.item(), time_left))
+                if n_iter % opt.log_every == 1:
+                    logger.add_image(img, 'image/training')
+                    logger.add_image(mask, 'mask/training')
+                    logger.add_image(first_out_wholeimg, 'image/first iteration')
+                    logger.add_image(second_out_wholeimg, 'image/second iteration')
+
+                # Fake samples
+                fake_scalar = discriminator(second_out_wholeimg.detach(), mask)
+                # True samples
+                true_scalar = discriminator(img, mask)
+
+                # Overall Loss and optimize
+                loss_D = -torch.mean(true_scalar) + torch.mean(fake_scalar)
+                loss_D.backward()
+                optimizer_d.step()
+
+                ### Train Generator
+                optimizer_g.zero_grad()
+
+                # Mask L1 Loss
+                first_MaskL1Loss = L1Loss(first_out_wholeimg, img)
+                second_MaskL1Loss = L1Loss(second_out_wholeimg, img)
+
+                # GAN Loss
+                fake_scalar = discriminator(second_out_wholeimg, mask)
+                GAN_Loss = -1 * torch.mean(fake_scalar)
+
+                # Get the deep semantic feature maps, and compute Perceptual Loss
+                img = (img + 1) / 2                                             # in range [0, 1]
+                img = utils.normalize_ImageNet_stats(img)                       # in range of ImageNet
+                img_featuremaps = perceptualnet(img)                            # feature maps
+                second_out_wholeimg = (second_out_wholeimg + 1) / 2             # in range [0, 1]
+                second_out_wholeimg = utils.normalize_ImageNet_stats(second_out_wholeimg)
+                second_out_wholeimg_featuremaps = perceptualnet(second_out_wholeimg)
+                second_PerceptualLoss = L1Loss(second_out_wholeimg_featuremaps, img_featuremaps)
+
+                # Compute losses
+                loss = first_MaskL1Loss + second_MaskL1Loss + opt.perceptual_param * second_PerceptualLoss + opt.gan_param * GAN_Loss
+                loss.backward()
+                optimizer_g.step()
+
+                # Determine approximate time left
+                batches_done = epoch * len(dataloader) + batch_idx
+                batches_left = opt.epochs * len(dataloader) - batches_done
+                time_left = datetime.timedelta(seconds = batches_left * (time.time() - prev_time))
+                prev_time = time.time()
+
+                logger.add_scalars({
+                    'training/epoch': epoch + 1,
+                    'training/batch': batch_idx,
+                    'loss/first Mask L1 Loss': first_MaskL1Loss.item(),
+                    'loss/second Mask L1 Loss': second_MaskL1Loss.item(),
+                    'gan/D Loss': loss_D.item(),
+                    'gan/G Loss': opt.gan_param * GAN_Loss.item(),
+                    'loss/Perceptual Loss': opt.perceptual_param * second_PerceptualLoss.item()
+                })
+
+                # Print log
+                print("\r[Epoch %d/%d] [Batch %d/%d] [first Mask L1 Loss: %.5f] [second Mask L1 Loss: %.5f]" %
+                    ((epoch + 1), opt.epochs, batch_idx, len(dataloader), first_MaskL1Loss.item(), second_MaskL1Loss.item()))
+                print("\r[D Loss: %.5f] [G Loss: %.5f] [Perceptual Loss: %.5f] time_left: %s" %
+                    (loss_D.item(), GAN_Loss.item(), second_PerceptualLoss.item(), time_left))
 
         # Learning rate decrease
         adjust_learning_rate(opt.lr_g, optimizer_g, (epoch + 1), opt)
